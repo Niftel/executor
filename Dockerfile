@@ -17,25 +17,24 @@ RUN go build -o /praetor-executor .
 # the daemon a target runs. A binary baked here would be a second, drifting source.
 
 # Run Stage
-FROM python:3.11-slim
+FROM python:3.13-slim@sha256:bffeb7bd6a85767587059c6ba23e1e9122078e3aa3fa836099171b9bb5a9bb00
 
 # Install system dependencies
 # git: for cloning
 # openssh-client: for ssh connections
-# libssl-dev, libffi-dev, build-essential: for compiling python deps if needed
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     openssh-client \
-    build-essential \
-    libssl-dev \
-    libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Ansible into the system python (dedicated container). The executor uses
 # ansible-inventory here for inventory-sync runs; playbook execution happens in the
 # pushed Execution Pack, not this image. Versions are PINNED for reproducible
 # builds (issue #27); ansible-core matches the pack's engine (build/execpack specs).
-RUN pip install --no-cache-dir pip==24.2 \
+RUN pip install --no-cache-dir \
+        pip==26.0.1 \
+        setuptools==82.0.1 \
+        wheel==0.47.0 \
     && pip install --no-cache-dir \
         ansible-core==2.19.11 \
         ansible-runner==2.4.1 \
@@ -55,10 +54,6 @@ RUN useradd -m -u 1000 praetor
 RUN mkdir -p /home/praetor/.ssh && chown -R praetor:praetor /home/praetor/.ssh && chmod 700 /home/praetor/.ssh
 
 ENV HOME=/home/praetor
-
-# gosu lets the entrypoint drop privileges to the praetor user after fixing up
-# root-owned volume mounts.
-RUN apt-get update && apt-get install -y --no-install-recommends gosu && rm -rf /var/lib/apt/lists/*
 
 COPY deploy/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

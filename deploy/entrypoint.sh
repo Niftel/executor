@@ -32,5 +32,6 @@ chown praetor:praetor /home/praetor/.ssh/config
 mkdir -p /var/lib/praetor /opt/praetor/packs
 chown praetor:praetor /var/lib/praetor /opt/praetor /opt/praetor/packs
 
-# Drop privileges and exec
-exec gosu praetor "$@"
+# Drop privileges with Debian's native util-linux helper. Unlike the old gosu
+# package, this does not embed a second, stale Go runtime in the image.
+exec setpriv --reuid=1000 --regid=1000 --init-groups "$@"
