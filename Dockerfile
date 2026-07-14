@@ -1,5 +1,5 @@
 # Build Stage
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /app
 
@@ -17,7 +17,7 @@ RUN go build -o /praetor-executor .
 # the daemon a target runs. A binary baked here would be a second, drifting source.
 
 # Run Stage
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 # Install system dependencies
 # git: for cloning
