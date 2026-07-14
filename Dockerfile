@@ -17,25 +17,24 @@ RUN go build -o /praetor-executor .
 # the daemon a target runs. A binary baked here would be a second, drifting source.
 
 # Run Stage
-FROM python:3.11-slim
+FROM python:3.13-slim-bookworm@sha256:9d7f287598e1a5a978c015ee176d8216435aaf335ed69ac3c38dd1bbb10e8d64
 
 # Install system dependencies
 # git: for cloning
 # openssh-client: for ssh connections
-# libssl-dev, libffi-dev, build-essential: for compiling python deps if needed
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     openssh-client \
-    build-essential \
-    libssl-dev \
-    libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Ansible into the system python (dedicated container). The executor uses
 # ansible-inventory here for inventory-sync runs; playbook execution happens in the
 # pushed Execution Pack, not this image. Versions are PINNED for reproducible
 # builds (issue #27); ansible-core matches the pack's engine (build/execpack specs).
-RUN pip install --no-cache-dir pip==24.2 \
+RUN pip install --no-cache-dir \
+        pip==26.0.1 \
+        setuptools==82.0.1 \
+        wheel==0.47.0 \
     && pip install --no-cache-dir \
         ansible-core==2.19.11 \
         ansible-runner==2.4.1 \
