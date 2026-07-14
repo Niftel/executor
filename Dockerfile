@@ -17,7 +17,7 @@ RUN go build -o /praetor-executor .
 # the daemon a target runs. A binary baked here would be a second, drifting source.
 
 # Run Stage
-FROM python:3.13-slim-bookworm@sha256:9d7f287598e1a5a978c015ee176d8216435aaf335ed69ac3c38dd1bbb10e8d64
+FROM python:3.13-slim@sha256:bffeb7bd6a85767587059c6ba23e1e9122078e3aa3fa836099171b9bb5a9bb00
 
 # Install system dependencies
 # git: for cloning
@@ -54,10 +54,6 @@ RUN useradd -m -u 1000 praetor
 RUN mkdir -p /home/praetor/.ssh && chown -R praetor:praetor /home/praetor/.ssh && chmod 700 /home/praetor/.ssh
 
 ENV HOME=/home/praetor
-
-# gosu lets the entrypoint drop privileges to the praetor user after fixing up
-# root-owned volume mounts.
-RUN apt-get update && apt-get install -y --no-install-recommends gosu && rm -rf /var/lib/apt/lists/*
 
 COPY deploy/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
