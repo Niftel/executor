@@ -10,6 +10,7 @@ import (
 	"github.com/praetordev/env"
 	"github.com/praetordev/eventbus"
 	"github.com/praetordev/events"
+	"github.com/praetordev/executor/claimclient"
 	"github.com/praetordev/executor/core"
 	"github.com/praetordev/executor/ingestclient"
 	"github.com/praetordev/metrics"
@@ -51,6 +52,20 @@ func main() {
 		env.String("PRAETOR_INTERNAL_TOKEN", ""),
 		ingest,
 	)
+	claimURL := env.String("PRAETOR_SCHEDULER_CLAIM_URL", "")
+	if claimURL != "" {
+		claimer, err := claimclient.New(claimclient.Config{
+			SchedulerURL:    claimURL,
+			CAFile:          env.String("PRAETOR_SCHEDULER_CA_FILE", ""),
+			CertificateFile: env.String("PRAETOR_EXECUTOR_CERT_FILE", ""),
+			PrivateKeyFile:  env.String("PRAETOR_EXECUTOR_KEY_FILE", ""),
+			Timeout:         10 * time.Second,
+		})
+		if err != nil {
+			log.Fatalf("secure claim client misconfigured: %v", err)
+		}
+		runner.Claimer = claimer
+	}
 
 	// Check for One-Shot Mode
 	if env.String("PRAETOR_MODE", "") == "oneshot" {
