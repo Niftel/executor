@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/praetordev/events"
 	"github.com/praetordev/executor/ingestclient"
 	"github.com/praetordev/hostconn"
@@ -50,6 +51,13 @@ type BootstrapRunner struct {
 	// pkg/runtoken) and to authenticate its own in-cluster ingestion calls (e.g.
 	// the inventory-sync upsert).
 	internalToken string
+	// Claimer binds a dispatched run to this executor's certificate identity.
+	// A request carrying a dispatch ID is never processed without it.
+	Claimer RunClaimer
+}
+
+type RunClaimer interface {
+	Claim(context.Context, uuid.UUID, uuid.UUID) error
 }
 
 // NewBootstrapRunner constructs the runner from resolved config values. All
@@ -119,6 +127,16 @@ func (r *BootstrapRunner) fetchPackTarball(pack, arch string) (string, func(), e
 }
 
 func (r *BootstrapRunner) Run(req *events.ExecutionRequest, eventChan chan<- events.JobEvent) (err error) {
+	if req.DispatchID != uuid.Nil {
+		if r.Claimer == nil {
+			return fmt.Errorf("run %s has secure dispatch %s but no claim client is configured", req.ExecutionRunID, req.DispatchID)
+		}
+		claimContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := r.Claimer.Claim(claimContext, req.ExecutionRunID, req.DispatchID); err != nil {
+			return fmt.Errorf("claim run %s: %w", req.ExecutionRunID, err)
+		}
+	}
 	// Bootstrap metrics by mode, observed on return.
 	mode := "remote"
 	if req.JobManifest.InventorySync {
