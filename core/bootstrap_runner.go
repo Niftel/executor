@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Niftel/praetor-secrets/credential"
 	"github.com/google/uuid"
 	"github.com/praetordev/events"
 	"github.com/praetordev/executor/ingestclient"
@@ -54,10 +55,18 @@ type BootstrapRunner struct {
 	// Claimer binds a dispatched run to this executor's certificate identity.
 	// A request carrying a dispatch ID is never processed without it.
 	Claimer RunClaimer
+	// CredentialResolver retrieves a claimed run's credential directly from the
+	// secrets service using this executor's workload identity. Ingestion must
+	// never see plaintext credentials for secure dispatches.
+	CredentialResolver CredentialResolver
 }
 
 type RunClaimer interface {
 	Claim(context.Context, uuid.UUID, uuid.UUID) error
+}
+
+type CredentialResolver interface {
+	Resolve(context.Context, credential.ResolveRequest) (credential.ResolvedCredential, error)
 }
 
 // NewBootstrapRunner constructs the runner from resolved config values. All
@@ -166,22 +175,51 @@ func (r *BootstrapRunner) Run(req *events.ExecutionRequest, eventChan chan<- eve
 		}
 	}
 
-	// Resolve the run's Machine credential just-in-time. The scheduler put only the
-	// credential id in the manifest (no plaintext at rest in the outbox/NATS); the
-	// executor is DB-free, so ingestion decrypts server-side and returns the
-	// injectors, which we hold only in this in-memory manifest copy. A resolve
-	// failure is fatal — bootstrapping without credentials would fail on the target
-	// anyway, and failing here reports a clear cause.
+	// Resolve the run's Machine credential just-in-time. Secure dispatches resolve
+	// directly from Praetor Secrets using the executor's mTLS identity. The legacy
+	// ingestion path remains only for old messages without a dispatch ID.
 	if req.JobManifest.CredentialID != 0 {
-		if r.ingest == nil {
-			return fmt.Errorf("run %s needs credential %d but no ingestion client is configured", req.ExecutionRunID, req.JobManifest.CredentialID)
+		if req.DispatchID != uuid.Nil {
+			if r.CredentialResolver == nil {
+				return fmt.Errorf("run %s has a secure credential binding but no secrets client is configured", req.ExecutionRunID)
+			}
+			attemptID := uuid.NewString()
+			resolveContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			resolved, resolveErr := r.CredentialResolver.Resolve(resolveContext, credential.ResolveRequest{
+				RunID:       req.ExecutionRunID.String(),
+				AttemptID:   attemptID,
+				RequestedAt: time.Now().UTC(),
+			})
+			cancel()
+			if resolveErr != nil {
+				return fmt.Errorf("resolve credential for secure run %s: %w", req.ExecutionRunID, resolveErr)
+			}
+			if resolved.RunID != req.ExecutionRunID.String() || resolved.AttemptID != attemptID || !resolved.ExpiresAt.After(time.Now()) {
+				return fmt.Errorf("secrets service returned invalid resolution metadata for run %s", req.ExecutionRunID)
+			}
+			files := make(map[string]string, len(resolved.Files))
+			for _, file := range resolved.Files {
+				if file.Name == "" || file.Mode != "0600" {
+					return fmt.Errorf("secrets service returned an invalid credential file for run %s", req.ExecutionRunID)
+				}
+				if _, exists := files[file.Name]; exists {
+					return fmt.Errorf("secrets service returned duplicate credential files for run %s", req.ExecutionRunID)
+				}
+				files[file.Name] = file.Content
+			}
+			req.JobManifest.CredentialEnv = resolved.Environment
+			req.JobManifest.CredentialFiles = files
+		} else {
+			if r.ingest == nil {
+				return fmt.Errorf("legacy run %s needs credential %d but no ingestion client is configured", req.ExecutionRunID, req.JobManifest.CredentialID)
+			}
+			creds, resolveErr := r.ingest.ResolveCredentials(context.Background(), req.ExecutionRunID.String())
+			if resolveErr != nil {
+				return fmt.Errorf("resolve legacy credential %d for run %s: %w", req.JobManifest.CredentialID, req.ExecutionRunID, resolveErr)
+			}
+			req.JobManifest.CredentialEnv = creds.Env
+			req.JobManifest.CredentialFiles = creds.Files
 		}
-		creds, cerr := r.ingest.ResolveCredentials(context.Background(), req.ExecutionRunID.String())
-		if cerr != nil {
-			return fmt.Errorf("resolve credential %d for run %s: %w", req.JobManifest.CredentialID, req.ExecutionRunID, cerr)
-		}
-		req.JobManifest.CredentialEnv = creds.Env
-		req.JobManifest.CredentialFiles = creds.Files
 	}
 
 	// Inventory-sync runs don't bootstrap a host-runner: the executor runs

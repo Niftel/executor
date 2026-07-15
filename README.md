@@ -52,6 +52,9 @@ New scheduler dispatches include a unique dispatch ID. Before processing one,
 the executor claims the run through the scheduler's dedicated TLS 1.3 mutual-TLS
 endpoint. A failed claim, missing client configuration, or invalid certificate
 stops the run before credentials, inventory, or bootstrap data are accessed.
+After a successful claim, credential-backed secure runs resolve their injectors
+directly from Praetor Secrets over mTLS. Plaintext credentials do not pass
+through the scheduler or ingestion service.
 
 Configure the executor with:
 
@@ -61,7 +64,11 @@ Configure the executor with:
 | `PRAETOR_SCHEDULER_CA_FILE` | CA used to verify the scheduler listener |
 | `PRAETOR_EXECUTOR_CERT_FILE` | Executor workload certificate containing its SPIFFE URI SAN |
 | `PRAETOR_EXECUTOR_KEY_FILE` | Executor workload private-key file |
+| `PRAETOR_SECRETS_URL` | HTTPS base URL of the Praetor Secrets service |
+| `PRAETOR_SECRETS_CA_FILE` | CA used to verify the Praetor Secrets service |
 
 The private key is accepted only as a file path. The executor requires TLS 1.3,
 does not follow redirects, and does not send an identity header or bearer token;
-the scheduler derives the executor identity from the verified certificate.
+the scheduler and secrets service derive the executor identity from the verified
+certificate. The scheduler and secrets service may use different server CAs;
+the executor workload certificate must be trusted by both services.
