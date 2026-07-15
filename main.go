@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	secretsclient "github.com/Niftel/praetor-secrets/client"
 	"github.com/praetordev/env"
 	"github.com/praetordev/eventbus"
 	"github.com/praetordev/events"
@@ -65,6 +66,20 @@ func main() {
 			log.Fatalf("secure claim client misconfigured: %v", err)
 		}
 		runner.Claimer = claimer
+	}
+	secretsURL := env.String("PRAETOR_SECRETS_URL", "")
+	if secretsURL != "" {
+		resolver, err := secretsclient.New(secretsclient.Config{
+			BaseURL:         secretsURL,
+			CAFile:          env.String("PRAETOR_SECRETS_CA_FILE", ""),
+			CertificateFile: env.String("PRAETOR_EXECUTOR_CERT_FILE", ""),
+			PrivateKeyFile:  env.String("PRAETOR_EXECUTOR_KEY_FILE", ""),
+			Timeout:         15 * time.Second,
+		})
+		if err != nil {
+			log.Fatalf("secrets client misconfigured: %v", err)
+		}
+		runner.CredentialResolver = resolver
 	}
 
 	// Check for One-Shot Mode
