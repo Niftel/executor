@@ -1,0 +1,32 @@
+{
+  "_meta": {
+    "hostvars": {
+      "db-1": {
+        "ansible_host": "10.0.0.20"
+      },
+      "web-1": {
+        "ansible_host": "10.0.0.10",
+        "ansible_port": 22
+      }
+    }
+  },
+  "all": {
+    "children": [
+      "ungrouped",
+      "web"
+    ]
+  },
+  "ungrouped": {
+    "hosts": [
+      "db-1"
+    ]
+  },
+  "web": {
+    "hosts": [
+      "web-1"
+    ],
+    "vars": {
+      "environment": "demo"
+    }
+  }
+}
