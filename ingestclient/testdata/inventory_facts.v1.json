@@ -1,0 +1,10 @@
+{
+  "db-1": {
+    "ansible_distribution": "Debian",
+    "ansible_memtotal_mb": 4096
+  },
+  "web-1": {
+    "ansible_distribution": "Ubuntu",
+    "ansible_memtotal_mb": 2048
+  }
+}

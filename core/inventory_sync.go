@@ -59,14 +59,28 @@ func (r *BootstrapRunner) syncInventory(req *events.ExecutionRequest, eventChan 
 		return r.syncFail(req, eventChan, fmt.Errorf("ansible-inventory failed: %v: %s", err, out))
 	}
 
+	if err := r.postInventorySync(m.SyncInventoryID, out); err != nil {
+		return r.syncFail(req, eventChan, err)
+	}
+
+	msg := fmt.Sprintf("Inventory %d synced", m.SyncInventoryID)
+	eventChan <- events.JobEvent{
+		ExecutionRunID: req.ExecutionRunID, UnifiedJobID: req.UnifiedJobID,
+		Seq: 2, EventType: "JOB_COMPLETED", Timestamp: time.Now(), StdoutSnippet: &msg,
+	}
+	logger.Info("inventory sync complete", "run_id", req.ExecutionRunID)
+	return nil
+}
+
+func (r *BootstrapRunner) postInventorySync(inventoryID int64, payload []byte) error {
 	ingestion := r.IngestionURL
 	if ingestion == "" {
 		ingestion = "http://ingestion:8081"
 	}
-	url := fmt.Sprintf("%s/api/v1/inventories/%d/sync-data", ingestion, m.SyncInventoryID)
-	httpReq, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(out))
+	url := fmt.Sprintf("%s/api/v1/inventories/%d/sync-data", ingestion, inventoryID)
+	httpReq, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
-		return r.syncFail(req, eventChan, fmt.Errorf("building sync-data request: %w", err))
+		return fmt.Errorf("building sync-data request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	// sync-data is an in-cluster, authenticated ingestion endpoint; the executor
@@ -76,19 +90,12 @@ func (r *BootstrapRunner) syncInventory(req *events.ExecutionRequest, eventChan 
 	}
 	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
-		return r.syncFail(req, eventChan, fmt.Errorf("posting sync data: %w", err))
+		return fmt.Errorf("posting sync data: %w", err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return r.syncFail(req, eventChan, fmt.Errorf("ingestion upsert returned %d", resp.StatusCode))
+		return fmt.Errorf("ingestion upsert returned %d", resp.StatusCode)
 	}
-
-	msg := fmt.Sprintf("Inventory %d synced", m.SyncInventoryID)
-	eventChan <- events.JobEvent{
-		ExecutionRunID: req.ExecutionRunID, UnifiedJobID: req.UnifiedJobID,
-		Seq: 2, EventType: "JOB_COMPLETED", Timestamp: time.Now(), StdoutSnippet: &msg,
-	}
-	logger.Info("inventory sync complete", "run_id", req.ExecutionRunID)
 	return nil
 }
 
