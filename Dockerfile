@@ -45,6 +45,19 @@ RUN pip install --no-cache-dir \
 
 WORKDIR /
 
+# Create a non-root user
+RUN useradd -m -u 1000 praetor
+RUN mkdir -p /home/praetor/.ssh && chown -R praetor:praetor /home/praetor/.ssh && chmod 700 /home/praetor/.ssh
+
+ENV HOME=/home/praetor
+
+# Install locked collections before copying frequently changing application
+# artifacts, so normal Go/plugin edits retain the expensive runtime cache.
+COPY deploy/collections-requirements.yml /tmp/build/collections-requirements.yml
+USER praetor
+RUN ansible-galaxy collection install --no-deps -r /tmp/build/collections-requirements.yml
+USER root
+
 COPY --from=builder /praetor-executor /praetor-executor
 
 # Ansible plugins shipped to target hosts at bootstrap (checkpoint callback for
@@ -52,19 +65,8 @@ COPY --from=builder /praetor-executor /praetor-executor
 # since bootstrap_runner pushes this file to the host at connect time.
 COPY deploy/plugins /tmp/build/plugins
 
-# Create a non-root user
-RUN useradd -m -u 1000 praetor
-RUN mkdir -p /home/praetor/.ssh && chown -R praetor:praetor /home/praetor/.ssh && chmod 700 /home/praetor/.ssh
-
-ENV HOME=/home/praetor
-
 COPY deploy/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
-
-# Install collections as praetor user to ensure they are in ~/.ansible
-USER praetor
-RUN ansible-galaxy collection install ansible.posix community.general community.mysql
-USER root
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["/praetor-executor"]
