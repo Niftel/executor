@@ -2,11 +2,11 @@ package core
 
 import (
 	"fmt"
-	"github.com/praetordev/plog"
 	"sync"
 	"time"
 
 	"github.com/praetordev/events"
+	"github.com/praetordev/plog"
 )
 
 // logger is the executor package component logger; the composition root
@@ -105,9 +105,9 @@ func (a *Agent) processRequest(req events.ExecutionRequest) {
 
 	// Run the job (blocking for this worker)
 	if err := a.Runner.Run(&req, eventChan); err != nil {
-		logger.Error("job run failed", "err", err)
+		failMsg := boundedErrorText(fmt.Sprintf("Runner failed: %v", err))
+		logger.Error("job run failed", "err", failMsg)
 		// Emit JOB_FAILED event since runner didn't succeed
-		failMsg := fmt.Sprintf("Runner failed: %v", err)
 		eventChan <- events.JobEvent{
 			ExecutionRunID: req.ExecutionRunID,
 			UnifiedJobID:   req.UnifiedJobID,

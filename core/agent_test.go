@@ -1,8 +1,11 @@
 package core_test
 
 import (
+	"errors"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/praetordev/events"
@@ -58,6 +61,37 @@ func TestAgentProcessing(t *testing.T) {
 	}
 }
 
+func TestAgentBoundsRunnerFailureEvent(t *testing.T) {
+	reqChan := make(chan events.ExecutionRequest, 1)
+	eventChan := make(chan events.JobEvent, 1)
+	agent := core.NewAgent(
+		&TestSubscriber{ch: reqChan},
+		&TestPublisher{ch: eventChan},
+		&failingRunner{err: errors.New("bootstrap: " + strings.Repeat("x", 2<<20) + " শেষ failure")},
+		1,
+	)
+	done := make(chan error, 1)
+	go func() { done <- agent.Start() }()
+	reqChan <- events.ExecutionRequest{ExecutionRunID: uuid.New(), UnifiedJobID: 42}
+	close(reqChan)
+
+	select {
+	case evt := <-eventChan:
+		if evt.EventType != "JOB_FAILED" || evt.StdoutSnippet == nil {
+			t.Fatalf("unexpected terminal event: %#v", evt)
+		}
+		message := *evt.StdoutSnippet
+		if len(message) > 16*1024 || !utf8.ValidString(message) || !strings.Contains(message, "[truncated]") || !strings.HasSuffix(message, "শেষ failure") {
+			t.Fatalf("failure event was not safely bounded: bytes=%d tail=%q", len(message), message[max(0, len(message)-64):])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for bounded failure event")
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("agent stopped with error: %v", err)
+	}
+}
+
 // -- Test Helpers --
 
 type TestSubscriber struct {
@@ -70,6 +104,12 @@ func (s *TestSubscriber) SubscribeToExecutionRequests() (<-chan events.Execution
 
 type TestPublisher struct {
 	ch chan events.JobEvent
+}
+
+type failingRunner struct{ err error }
+
+func (r *failingRunner) Run(_ *events.ExecutionRequest, _ chan<- events.JobEvent) error {
+	return r.err
 }
 
 func (p *TestPublisher) PublishJobEvent(event *events.JobEvent) error {

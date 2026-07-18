@@ -532,8 +532,8 @@ func pushStream(client *ssh.Client, r io.Reader, remoteCmd string) error {
 	}
 	defer sess.Close()
 	sess.Stdin = r
-	var stderr bytes.Buffer
-	sess.Stderr = &stderr
+	stderr := newBoundedTailBuffer(maxExecutorErrorBytes)
+	sess.Stderr = stderr
 	if err := sess.Run(remoteCmd); err != nil {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
 	}
