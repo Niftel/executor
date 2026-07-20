@@ -9,7 +9,7 @@ require (
 	github.com/praetordev/eventbus v0.1.0
 	github.com/praetordev/events v0.1.1-0.20260715180212-73a43baa18fc
 	github.com/praetordev/hostconn v0.1.0
-	github.com/praetordev/metrics v0.1.0
+	github.com/praetordev/metrics v0.1.1
 	github.com/praetordev/plog v0.1.0
 	github.com/praetordev/runtoken v0.1.0
 	github.com/prometheus/client_golang v1.23.2
