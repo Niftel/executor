@@ -43,7 +43,7 @@ func (r *BootstrapRunner) syncInventory(req *events.ExecutionRequest, eventChan 
 
 	dir, err := os.MkdirTemp("", "praetor-sync-")
 	if err != nil {
-		return r.syncFail(req, eventChan, err)
+		return r.syncAcquireFail(req, eventChan, "workspace_setup_failed", "Unable to prepare the isolated inventory workspace.", err)
 	}
 	defer os.RemoveAll(dir)
 
@@ -54,7 +54,7 @@ func (r *BootstrapRunner) syncInventory(req *events.ExecutionRequest, eventChan 
 	}
 	srcPath := filepath.Join(dir, name)
 	if err := os.WriteFile(srcPath, []byte(m.InventorySource), mode); err != nil {
-		return r.syncFail(req, eventChan, err)
+		return r.syncAcquireFail(req, eventChan, "source_setup_failed", "Unable to prepare the inventory source.", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -69,7 +69,7 @@ func (r *BootstrapRunner) syncInventory(req *events.ExecutionRequest, eventChan 
 		// k is an env var name (alnum/underscore), safe to use as a filename.
 		fp := filepath.Join(dir, "cred_"+k)
 		if err := os.WriteFile(fp, []byte(content), 0o600); err != nil {
-			return r.syncFail(req, eventChan, fmt.Errorf("writing credential file %s: %w", k, err))
+			return r.syncAcquireFail(req, eventChan, "credential_setup_failed", "Unable to prepare the source credential.", fmt.Errorf("writing credential file %s: %w", k, err))
 		}
 		env = append(env, k+"="+fp)
 	}
@@ -80,9 +80,11 @@ func (r *BootstrapRunner) syncInventory(req *events.ExecutionRequest, eventChan 
 	out := stdout.buf.Bytes()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return r.syncFail(req, eventChan, fmt.Errorf("ansible-inventory timed out after 60 seconds"))
+			return r.syncAcquireFail(req, eventChan, "provider_timeout", "The inventory provider exceeded the 60 second acquisition limit.", fmt.Errorf("ansible-inventory timed out after 60 seconds"))
 		}
-		return r.syncFail(req, eventChan, fmt.Errorf("ansible-inventory failed: %v: %s", err, stderr.buf.String()))
+		// Provider stderr may echo request headers, tokens, or credential values.
+		// Keep it out of events/history and report only a stable safe diagnostic.
+		return r.syncAcquireFail(req, eventChan, "provider_acquisition_failed", "The inventory provider could not acquire its host data.", fmt.Errorf("ansible-inventory failed: %v", err))
 	}
 
 	if m.InventoryPreview {
@@ -95,7 +97,7 @@ func (r *BootstrapRunner) syncInventory(req *events.ExecutionRequest, eventChan 
 		return nil
 	}
 
-	if err := r.postInventorySync(m.SyncInventoryID, out); err != nil {
+	if err := r.postInventorySync(req, out); err != nil {
 		return r.syncFail(req, eventChan, err)
 	}
 
@@ -149,7 +151,8 @@ func summarizeInventoryPreview(payload []byte) (string, error) {
 	return string(summary), nil
 }
 
-func (r *BootstrapRunner) postInventorySync(inventoryID int64, payload []byte) error {
+func (r *BootstrapRunner) postInventorySync(req *events.ExecutionRequest, payload []byte) error {
+	inventoryID := req.JobManifest.SyncInventoryID
 	ingestion := r.IngestionURL
 	if ingestion == "" {
 		ingestion = "http://ingestion:8081"
@@ -160,6 +163,8 @@ func (r *BootstrapRunner) postInventorySync(inventoryID int64, payload []byte) e
 		return fmt.Errorf("building sync-data request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Praetor-Unified-Job-ID", fmt.Sprint(req.UnifiedJobID))
+	httpReq.Header.Set("X-Praetor-Execution-Run-ID", req.ExecutionRunID.String())
 	// sync-data is an in-cluster, authenticated ingestion endpoint; the executor
 	// presents the shared internal token (the host-runner is not involved here).
 	if r.internalToken != "" {
@@ -172,6 +177,47 @@ func (r *BootstrapRunner) postInventorySync(inventoryID int64, payload []byte) e
 	resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("ingestion upsert returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (r *BootstrapRunner) syncAcquireFail(req *events.ExecutionRequest, eventChan chan<- events.JobEvent, code, safeMessage string, cause error) error {
+	if !req.JobManifest.InventoryPreview {
+		if err := r.postInventorySyncFailure(req, "acquisition", code, safeMessage); err != nil {
+			logger.Error("inventory sync failure history unavailable", "run_id", req.ExecutionRunID, "err", err)
+		}
+	}
+	return r.syncFail(req, eventChan, cause)
+}
+
+func (r *BootstrapRunner) postInventorySyncFailure(req *events.ExecutionRequest, phase, code, message string) error {
+	payload, err := json.Marshal(map[string]any{
+		"unified_job_id": req.UnifiedJobID, "execution_run_id": req.ExecutionRunID,
+		"phase": phase, "code": code, "message": message,
+	})
+	if err != nil {
+		return err
+	}
+	ingestion := r.IngestionURL
+	if ingestion == "" {
+		ingestion = "http://ingestion:8081"
+	}
+	url := fmt.Sprintf("%s/api/v1/inventories/%d/sync-failure", ingestion, req.JobManifest.SyncInventoryID)
+	httpReq, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if r.internalToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+r.internalToken)
+	}
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("ingestion failure report returned %d", resp.StatusCode)
 	}
 	return nil
 }

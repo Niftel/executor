@@ -7,6 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/google/uuid"
+	"github.com/praetordev/events"
 )
 
 func TestPostInventorySyncMatchesV1Contract(t *testing.T) {
@@ -26,13 +29,20 @@ func TestPostInventorySyncMatchesV1Contract(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer internal-token" {
 			t.Errorf("authorization = %q", r.Header.Get("Authorization"))
 		}
+		if r.Header.Get("X-Praetor-Unified-Job-ID") != "42" {
+			t.Errorf("job id header = %q", r.Header.Get("X-Praetor-Unified-Job-ID"))
+		}
+		if r.Header.Get("X-Praetor-Execution-Run-ID") == "" {
+			t.Error("execution run id header is missing")
+		}
 		got, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer server.Close()
 
 	runner := NewBootstrapRunner("", "", "", server.URL, "", "internal-token", nil)
-	if err := runner.postInventorySync(7, fixture); err != nil {
+	req := &events.ExecutionRequest{UnifiedJobID: 42, ExecutionRunID: uuid.New(), JobManifest: events.JobManifest{SyncInventoryID: 7}}
+	if err := runner.postInventorySync(req, fixture); err != nil {
 		t.Fatal(err)
 	}
 	if string(got) != string(fixture) {
