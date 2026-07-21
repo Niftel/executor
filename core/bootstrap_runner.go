@@ -1,8 +1,11 @@
 package core
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +14,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -23,6 +27,8 @@ import (
 	"github.com/praetordev/runtoken"
 	"golang.org/x/crypto/ssh"
 )
+
+var executionPackName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 // BootstrapRunner deploys the self-contained Execution Pack (host-runner daemon +
 // Python + Ansible) to a target host directly over SSH — no Ansible and no Python
@@ -382,34 +388,150 @@ func (r *BootstrapRunner) Run(req *events.ExecutionRequest, eventChan chan<- eve
 
 // pushRuntime streams the named Execution Pack onto the target and extracts it
 // under /opt/praetor/packs/<pack>. It probes the host's CPU arch so it pushes the
-// matching pack (<pack>-linux-<arch>.tar.gz); if it's already present it does
-// nothing. Packs are name-scoped so several coexist on one host.
+// matching pack (<pack>-linux-<arch>.tar.gz). A matching digest is reused;
+// changed content is staged and activated atomically. Packs are name-scoped so
+// several coexist on one host.
 func (r *BootstrapRunner) pushRuntime(client *ssh.Client, pack, sudo string) error {
-	detect, err := runSSH(client, fmt.Sprintf(`if [ -x /opt/praetor/packs/%s/bin/ansible-playbook ]; then echo present; else
+	if !executionPackName.MatchString(pack) {
+		return fmt.Errorf("invalid Execution Pack name %q", pack)
+	}
+	detect, err := runSSH(client, fmt.Sprintf(`if [ -x /opt/praetor/packs/%s/bin/ansible-playbook ]; then
+  cat /opt/praetor/packs/%s/.praetor-pack-digest 2>/dev/null || echo stale
+else
   case "$(uname -m)" in aarch64|arm64) echo arm64 ;; x86_64|amd64) echo amd64 ;; *) echo unknown ;; esac
-fi`, pack))
+fi`, pack, pack))
 	if err != nil {
 		return err
 	}
-	arch := strings.TrimSpace(detect)
-	if arch == "present" {
-		return nil
-	}
+	probe := strings.TrimSpace(detect)
+	arch := probe
 	if arch == "unknown" || arch == "" {
 		return fmt.Errorf("unsupported host CPU arch for Execution Pack")
+	}
+	if arch != "arm64" && arch != "amd64" {
+		archOut, archErr := runSSH(client, `case "$(uname -m)" in aarch64|arm64) echo arm64 ;; x86_64|amd64) echo amd64 ;; *) echo unknown ;; esac`)
+		if archErr != nil {
+			return archErr
+		}
+		arch = strings.TrimSpace(archOut)
+		if arch == "unknown" || arch == "" {
+			return fmt.Errorf("unsupported host CPU arch for Execution Pack")
+		}
 	}
 	tarball, cleanup, err := r.fetchPackTarball(pack, arch)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
+	digest, err := validatePackTarball(tarball, pack)
+	if err != nil {
+		return fmt.Errorf("validate Execution Pack %q for %s: %w", pack, arch, err)
+	}
+	if probe == digest {
+		return nil
+	}
 	f, err := os.Open(tarball)
 	if err != nil {
 		return fmt.Errorf("open Execution Pack %q for %s: %w", pack, arch, err)
 	}
 	defer f.Close()
-	logger.Info("pushing execution pack", "pack", pack, "arch", arch)
-	return pushStream(client, f, fmt.Sprintf("%smkdir -p /opt/praetor/packs && %star -xzf - -C /", sudo, sudo))
+	logger.Info("pushing execution pack", "pack", pack, "arch", arch, "digest", digest)
+	return pushStream(client, f, packInstallCommand(pack, digest, sudo))
+}
+
+// validatePackTarball hashes and validates the archive before target-side
+// activation. Every entry must remain beneath the selected pack prefix.
+func validatePackTarball(filename, pack string) (string, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	hashed := io.TeeReader(f, h)
+	gz, err := gzip.NewReader(hashed)
+	if err != nil {
+		return "", err
+	}
+	packRoot := "opt/praetor/packs/" + pack
+	prefix := packRoot + "/"
+	tr := tar.NewReader(gz)
+	foundRunner, foundAnsible := false, false
+	for {
+		hdr, nextErr := tr.Next()
+		if nextErr == io.EOF {
+			break
+		}
+		if nextErr != nil {
+			return "", nextErr
+		}
+		clean := path.Clean(hdr.Name)
+		ancestorDir := hdr.Typeflag == tar.TypeDir && strings.HasPrefix(packRoot+"/", clean+"/")
+		if (!ancestorDir && clean != packRoot && !strings.HasPrefix(clean, prefix)) || strings.Contains(hdr.Name, "\\") {
+			return "", fmt.Errorf("archive entry %q is outside %s", hdr.Name, prefix)
+		}
+		rel := strings.TrimPrefix(clean, prefix)
+		if hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
+			target := path.Clean(path.Join(path.Dir(rel), hdr.Linkname))
+			if path.IsAbs(hdr.Linkname) || target == ".." || strings.HasPrefix(target, "../") {
+				return "", fmt.Errorf("archive link %q escapes the pack", hdr.Name)
+			}
+		}
+		foundRunner = foundRunner || rel == "bin/praetor-host-runner"
+		foundAnsible = foundAnsible || rel == "bin/ansible-playbook"
+	}
+	if err := gz.Close(); err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(io.Discard, hashed); err != nil {
+		return "", err
+	}
+	if !foundRunner || !foundAnsible {
+		return "", fmt.Errorf("archive is missing required executables")
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+// packInstallCommand extracts into a digest-versioned sibling, verifies it,
+// then switches the stable symlink. The target never stores the compressed
+// archive and the live pack is never a partially extracted directory.
+func packInstallCommand(pack, digest, sudo string) string {
+	return packInstallCommandAt(pack, digest, sudo, "/opt/praetor/packs")
+}
+
+func packInstallCommandAt(pack, digest, sudo, root string) string {
+	version := fmt.Sprintf(".%s-%s", pack, digest)
+	return fmt.Sprintf(`set -eu
+root=%s
+version="$root/%s"
+partial="$version.partial.$$"
+link="$root/.%s.link.$$"
+legacy="$root/.%s.legacy.$$"
+cleanup() { %srm -rf "$partial" "$link"; }
+trap cleanup EXIT HUP INT TERM
+%smkdir -p "$root"
+%srm -rf "$partial" "$version"
+%smkdir -p "$partial"
+%star -xzf - -C "$partial" --strip-components=4
+test -x "$partial/bin/ansible-playbook"
+test -x "$partial/bin/praetor-host-runner"
+printf '%%s\n' %s > "$partial/.praetor-pack-digest"
+%smv "$partial" "$version"
+%sln -s %s "$link"
+if [ -d "$root/%s" ] && [ ! -L "$root/%s" ]; then
+  %smv "$root/%s" "$legacy"
+  %smv "$link" "$root/%s"
+  %srm -rf "$legacy"
+else
+  if ! %smv -Tf "$link" "$root/%s" 2>/dev/null; then
+    %srm -f "$root/%s"
+    %smv "$link" "$root/%s"
+  fi
+fi
+trap - EXIT HUP INT TERM
+cleanup`, sshQuote(root), version, pack, pack, sudo, sudo, sudo, sudo, sudo, sshQuote(digest),
+		sudo, sudo, sshQuote(version), pack, pack, sudo, pack, sudo, pack, sudo,
+		sudo, pack, sudo, pack, sudo, pack)
 }
 
 // localBootstrap runs the host-runner on the executor itself for jobs with no
