@@ -42,7 +42,7 @@ func TestPackInstallReplacesDigestWithoutRemoteArchive(t *testing.T) {
 	if firstDigest != wantFirstDigest {
 		t.Fatalf("pack digest = %s, want %s", firstDigest, wantFirstDigest)
 	}
-	if command := packInstallCommandAt("ansible-runtime", firstDigest, "", root); strings.Contains(command, "/tmp") {
+	if command := packInstallCommand("ansible-runtime", firstDigest, ""); strings.Contains(command, "/tmp") {
 		t.Fatalf("target install command relies on /tmp: %s", command)
 	}
 	runPackInstall(t, root, first, firstDigest, true)
