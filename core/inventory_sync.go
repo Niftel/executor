@@ -59,7 +59,7 @@ func (r *BootstrapRunner) syncInventory(req *events.ExecutionRequest, eventChan 
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "ansible-inventory", "-i", srcPath, "--list")
+	cmd := inventoryAcquisitionCommand(ctx, m.InventorySourceKind, srcPath)
 	// Apply credential injectors so the inventory plugin can authenticate.
 	env := os.Environ()
 	for k, v := range m.CredentialEnv {
@@ -108,6 +108,17 @@ func (r *BootstrapRunner) syncInventory(req *events.ExecutionRequest, eventChan 
 	}
 	logger.Info("inventory sync complete", "run_id", req.ExecutionRunID)
 	return nil
+}
+
+// Executable inventory scripts are invoked directly so their exit status is
+// authoritative. Passing them through ansible-inventory can turn a provider
+// authentication failure into a warning plus an empty, successful inventory,
+// which would incorrectly disable every source-owned host.
+func inventoryAcquisitionCommand(ctx context.Context, sourceKind, sourcePath string) *exec.Cmd {
+	if sourceKind == "script" {
+		return exec.CommandContext(ctx, sourcePath, "--list")
+	}
+	return exec.CommandContext(ctx, "ansible-inventory", "-i", sourcePath, "--list")
 }
 
 func summarizeInventoryPreview(payload []byte) (string, error) {

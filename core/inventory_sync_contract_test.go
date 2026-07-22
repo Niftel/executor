@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,16 @@ import (
 	"github.com/google/uuid"
 	"github.com/praetordev/events"
 )
+
+func TestInventoryScriptExitStatusIsAuthoritative(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "inventory-script")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 23\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := inventoryAcquisitionCommand(context.Background(), "script", script).Run(); err == nil {
+		t.Fatal("failing inventory script was treated as successful")
+	}
+}
 
 func TestPostInventorySyncMatchesV1Contract(t *testing.T) {
 	fixture, err := os.ReadFile(filepath.Join("testdata", "inventory_sync.v1.json"))
