@@ -12,10 +12,14 @@ import (
 	"sort"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/praetordev/events"
 )
 
-const inventoryPreviewOutputLimit = 1 << 20
+const (
+	inventoryPreviewOutputLimit = 1 << 20
+	inventoryHeartbeatInterval  = 5 * time.Second
+)
 
 type boundedWriter struct {
 	buf bytes.Buffer
@@ -40,6 +44,9 @@ func (r *BootstrapRunner) syncInventory(req *events.ExecutionRequest, eventChan 
 		ExecutionRunID: req.ExecutionRunID, UnifiedJobID: req.UnifiedJobID,
 		Seq: 1, EventType: "JOB_STARTED", Timestamp: time.Now(),
 	}
+	heartbeatCtx, stopHeartbeat := context.WithCancel(context.Background())
+	defer stopHeartbeat()
+	go r.runInventoryHeartbeat(heartbeatCtx, req.ExecutionRunID, inventoryHeartbeatInterval)
 
 	dir, err := os.MkdirTemp("", "praetor-sync-")
 	if err != nil {
@@ -108,6 +115,53 @@ func (r *BootstrapRunner) syncInventory(req *events.ExecutionRequest, eventChan 
 	}
 	logger.Info("inventory sync complete", "run_id", req.ExecutionRunID)
 	return nil
+}
+
+// runInventoryHeartbeat maintains liveness for inventory synchronizations that
+// execute directly inside the executor. Unlike playbook runs, these jobs do not
+// launch the host-runner, so the executor owns their heartbeat for the entire
+// acquisition and reconciliation window.
+func (r *BootstrapRunner) runInventoryHeartbeat(ctx context.Context, runID uuid.UUID, interval time.Duration) {
+	ingestion := r.IngestionURL
+	if ingestion == "" {
+		ingestion = "http://ingestion:8081"
+	}
+	url := fmt.Sprintf("%s/api/v1/runs/%s/heartbeat", ingestion, runID)
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	send := func() {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+		if err != nil {
+			logger.Warn("inventory sync heartbeat request failed", "run_id", runID, "err", err)
+			return
+		}
+		if r.internalToken != "" {
+			req.Header.Set("Authorization", "Bearer "+r.internalToken)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			if ctx.Err() == nil {
+				logger.Warn("inventory sync heartbeat failed", "run_id", runID, "err", err)
+			}
+			return
+		}
+		resp.Body.Close()
+		if resp.StatusCode >= http.StatusMultipleChoices {
+			logger.Warn("inventory sync heartbeat rejected", "run_id", runID, "status", resp.StatusCode)
+		}
+	}
+
+	send()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			send()
+		}
+	}
 }
 
 // Executable inventory scripts are invoked directly so their exit status is
