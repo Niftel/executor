@@ -104,7 +104,7 @@ func TestSecureCredentialResolvedDirectly(t *testing.T) {
 	if got := req.JobManifest.CredentialEnv["ANSIBLE_REMOTE_USER"]; got != "automation" {
 		t.Fatalf("CredentialEnv user = %q", got)
 	}
-	if got := req.JobManifest.CredentialFiles["ANSIBLE_PRIVATE_KEY_FILE"]; got != "private material" {
+	if got := req.JobManifest.CredentialFiles["ANSIBLE_PRIVATE_KEY_FILE"]; got != "private material\n" {
 		t.Fatalf("CredentialFiles key = %q", got)
 	}
 }
