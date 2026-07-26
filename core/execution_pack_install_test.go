@@ -74,6 +74,21 @@ func TestPackInstallReplacesDigestWithoutRemoteArchive(t *testing.T) {
 	}
 }
 
+func TestPackInstallWritesDigestThroughSudoForNonRootLogin(t *testing.T) {
+	command := packInstallCommandAt(
+		"ansible-runtime",
+		strings.Repeat("a", 64),
+		"sudo ",
+		"/opt/praetor/packs",
+	)
+	if !strings.Contains(command, `| sudo tee "$partial/.praetor-pack-digest" >/dev/null`) {
+		t.Fatalf("non-root pack install does not write the root-owned digest marker through sudo:\n%s", command)
+	}
+	if strings.Contains(command, `sudo printf`) {
+		t.Fatalf("non-root pack install relies on a privileged command with an unprivileged shell redirection:\n%s", command)
+	}
+}
+
 func TestInterruptedPackInstallKeepsActivePackAndCleansPartial(t *testing.T) {
 	root := t.TempDir()
 	good := writePackArchive(t, "ansible-runtime", map[string]string{

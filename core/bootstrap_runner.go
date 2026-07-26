@@ -227,6 +227,12 @@ func (r *BootstrapRunner) Run(req *events.ExecutionRequest, eventChan chan<- eve
 			req.JobManifest.CredentialFiles = creds.Files
 		}
 	}
+	// OpenSSH private keys require a terminating newline. Normalize the resolved
+	// key once before the manifest is marshaled so both the executor's bootstrap
+	// SSH client and Ansible on the target receive identical valid material.
+	if key := req.JobManifest.CredentialFiles["ANSIBLE_PRIVATE_KEY_FILE"]; key != "" && !strings.HasSuffix(key, "\n") {
+		req.JobManifest.CredentialFiles["ANSIBLE_PRIVATE_KEY_FILE"] = key + "\n"
+	}
 
 	// Inventory-sync runs don't bootstrap a host-runner: the executor runs
 	// ansible-inventory locally and upserts the result via ingestion.
@@ -306,9 +312,6 @@ func (r *BootstrapRunner) Run(req *events.ExecutionRequest, eventChan chan<- eve
 	keyContent := req.JobManifest.CredentialFiles["ANSIBLE_PRIVATE_KEY_FILE"]
 	if keyContent == "" {
 		return fmt.Errorf("no SSH key for runner host %s: assign a Machine credential with an SSH private key to the job template", req.JobManifest.RunnerHost)
-	}
-	if !strings.HasSuffix(keyContent, "\n") {
-		keyContent += "\n" // SSH rejects a key file without a trailing newline
 	}
 	sshKeyPath := fmt.Sprintf("/tmp/cred-key-%s", req.ExecutionRunID)
 	if err := os.WriteFile(sshKeyPath, []byte(keyContent), 0o600); err != nil {
@@ -501,6 +504,14 @@ func packInstallCommand(pack, digest, sudo string) string {
 
 func packInstallCommandAt(pack, digest, sudo, root string) string {
 	version := fmt.Sprintf(".%s-%s", pack, digest)
+	writeDigest := fmt.Sprintf(`printf '%%s\n' %s > "$partial/.praetor-pack-digest"`, sshQuote(digest))
+	if sudo != "" {
+		// The partial tree is created and extracted through sudo for non-root
+		// SSH users, so its digest marker must be written through the same
+		// privilege boundary. A shell redirection after `sudo printf` would
+		// still run as the unprivileged login user.
+		writeDigest = fmt.Sprintf(`printf '%%s\n' %s | %stee "$partial/.praetor-pack-digest" >/dev/null`, sshQuote(digest), sudo)
+	}
 	return fmt.Sprintf(`set -eu
 root=%s
 version="$root/%s"
@@ -515,7 +526,7 @@ trap cleanup EXIT HUP INT TERM
 %star -xzf - -C "$partial" --strip-components=4
 test -x "$partial/bin/ansible-playbook"
 test -x "$partial/bin/praetor-host-runner"
-printf '%%s\n' %s > "$partial/.praetor-pack-digest"
+%s
 %smv "$partial" "$version"
 %sln -s %s "$link"
 if [ -d "$root/%s" ] && [ ! -L "$root/%s" ]; then
@@ -529,7 +540,7 @@ else
   fi
 fi
 trap - EXIT HUP INT TERM
-cleanup`, sshQuote(root), version, pack, pack, sudo, sudo, sudo, sudo, sudo, sshQuote(digest),
+cleanup`, sshQuote(root), version, pack, pack, sudo, sudo, sudo, sudo, sudo, writeDigest,
 		sudo, sudo, sshQuote(version), pack, pack, sudo, pack, sudo, pack, sudo,
 		sudo, pack, sudo, pack, sudo, pack)
 }
