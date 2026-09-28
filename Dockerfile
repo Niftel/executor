@@ -1,5 +1,5 @@
 # Build Stage — compile on the native CI runner instead of emulating the target.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
